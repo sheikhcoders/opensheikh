@@ -1,121 +1,74 @@
 import { create } from 'zustand'
-
-// API-aligned types from OpenAPI spec
-interface Message {
-  id: string
-  sessionID: string
-  role: 'user' | 'assistant'
-  time: {
-    created: number
-    completed?: number
-  }
-  // Assistant-specific fields
-  error?: any
-  system?: string[]
-  modelID?: string
-  providerID?: string
-  path?: {
-    cwd: string
-    root: string
-  }
-  summary?: boolean
-  cost?: number
-  tokens?: {
-    input: number
-    output: number
-    reasoning: number
-    cache: {
-      read: number
-      write: number
-    }
-  }
-}
-
-interface Part {
-  id: string
-  sessionID: string
-  messageID: string
-  type: 'text' | 'file' | 'tool' | 'step-start' | 'step-finish'
-  // Type-specific fields will be added based on part type
-  text?: string
-  synthetic?: boolean
-  time?: {
-    start: number
-    end?: number
-  }
-  // Tool-specific fields
-  callID?: string
-  tool?: string
-  state?: any
-  // File-specific fields
-  mime?: string
-  filename?: string
-  url?: string
-  // Step-specific fields
-  cost?: number
-  tokens?: any
-}
-
-interface MessageWithParts {
-  info: Message
-  parts: Part[]
-}
+import type { Message, AssistantMessagePart } from '../services/types'
 
 interface MessageStoreV2State {
-  messages: MessageWithParts[]
+  messages: Message[]
   
   // Session management
-  hydrateFromSession: (messages: MessageWithParts[]) => void
+  hydrateFromSession: (messages: Message[]) => void
   
   // Event stream handlers
   handleMessageUpdated: (info: Message) => void
-  handlePartUpdated: (part: Part) => void
+  handlePartUpdated: (part: AssistantMessagePart, messageId: string) => void
   handleMessageRemoved: (messageId: string) => void
   
   // User actions
-  addUserMessage: (content: string, messageId: string) => void
+  addUserMessage: (message: Message) => void
   clearMessages: () => void
 }
 
 export const useMessageStoreV2 = create<MessageStoreV2State>((set) => ({
   messages: [],
   
-  hydrateFromSession: (messages: MessageWithParts[]) => {
+  hydrateFromSession: (messages: Message[]) => {
     set({ messages })
   },
   
   handleMessageUpdated: (info: Message) => {
     set((state) => {
-      const existingIndex = state.messages.findIndex(msg => msg.info.id === info.id)
+      const existingIndex = state.messages.findIndex(msg => msg.id === info.id)
       if (existingIndex >= 0) {
         const updatedMessages = [...state.messages]
         updatedMessages[existingIndex] = {
-          ...updatedMessages[existingIndex],
-          info
+          ...info,
+          parts: info.parts || updatedMessages[existingIndex].parts || []
         }
         return { messages: updatedMessages }
       } else {
         return {
-          messages: [...state.messages, { info, parts: [] }]
+          messages: [...state.messages, info]
         }
       }
     })
   },
   
-  handlePartUpdated: (part: Part) => {
+  handlePartUpdated: (part: AssistantMessagePart, messageId: string) => {
     set((state) => {
-      const messageIndex = state.messages.findIndex(msg => msg.info.id === part.messageID)
+      const messageIndex = state.messages.findIndex(msg => msg.id === messageId)
       if (messageIndex >= 0) {
         const updatedMessages = [...state.messages]
-        const message = updatedMessages[messageIndex]
-        const partIndex = message.parts.findIndex(p => p.id === part.id)
+        const message = { ...updatedMessages[messageIndex] }
+        const parts = [...(message.parts || [])]
         
-        if (partIndex >= 0) {
-          message.parts[partIndex] = part
+        // Only ToolPart and TextPart have IDs in the current types
+        const partWithId = part as { id?: string }
+        if (partWithId.id) {
+          const partIndex = parts.findIndex(p => (p as { id?: string }).id === partWithId.id)
+          if (partIndex >= 0) {
+            parts[partIndex] = part
+          } else {
+            parts.push(part)
+          }
         } else {
-          message.parts.push(part)
+          // If no ID, we just append it (e.g. step-start/finish)
+          // unless we already have an identical one (to avoid duplicates if events are replayed)
+          // For now, let's just push.
+          parts.push(part)
         }
         
+        message.parts = parts
+        updatedMessages[messageIndex] = message
+
         return { messages: updatedMessages }
       }
       return state
@@ -124,30 +77,13 @@ export const useMessageStoreV2 = create<MessageStoreV2State>((set) => ({
   
   handleMessageRemoved: (messageId: string) => {
     set((state) => ({
-      messages: state.messages.filter(msg => msg.info.id !== messageId)
+      messages: state.messages.filter(msg => msg.id !== messageId)
     }))
   },
   
-  addUserMessage: (content: string, messageId: string) => {
-    const userMessage: MessageWithParts = {
-      info: {
-        id: messageId,
-        sessionID: '', // Will be set by caller
-        role: 'user',
-        time: { created: Date.now() }
-      },
-      parts: [{
-        id: `${messageId}-text`,
-        sessionID: '',
-        messageID: messageId,
-        type: 'text',
-        text: content,
-        time: { start: Date.now() }
-      }]
-    }
-    
+  addUserMessage: (message: Message) => {
     set((state) => ({
-      messages: [...state.messages, userMessage]
+      messages: [...state.messages, message]
     }))
   },
   
