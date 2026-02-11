@@ -4,6 +4,7 @@ import type { Message, AssistantMessagePart, MessageMetadata, MessageUpdatedProp
 import { getOverallToolStatus, getContextualToolStatus, hasActiveToolExecution, getToolProgress } from '../utils/toolStatusHelpers'
 import { useSessionStore } from '../stores/sessionStore'
 import { useMessageStore } from '../stores/messageStore'
+import { useMessageStoreV2 } from '../stores/messageStoreV2'
 import { logger } from '../lib/logger'
 
 export function useEventStream() {
@@ -13,13 +14,20 @@ export function useEventStream() {
   
   const eventStream = useMemo(() => createEventStream(), [])
   const { sessionId, setIdle } = useSessionStore()
+
+  // Keep old store for status/error messages for now
   const { 
     addStatusMessage, 
-    addTextMessage, 
     addErrorMessage, 
     removeLastEventMessage, 
     setLastStatusMessage 
   } = useMessageStore()
+
+  // New store for core chat messages
+  const {
+    handleMessageUpdated,
+    handlePartUpdated
+  } = useMessageStoreV2()
 
   const updateStatusFromMessage = useCallback((message: Message) => {
     if (!hasReceivedFirstEvent) {
@@ -28,6 +36,9 @@ export function useEventStream() {
     
     setCurrentMessageMetadata(message.metadata)
     
+    // Update new store
+    handleMessageUpdated(message)
+
     if (message.metadata?.time?.completed) {
       setIsLoading(false)
       return
@@ -41,36 +52,26 @@ export function useEventStream() {
       if (progress.total > 0) {
         addStatusMessage(`✓ Completed ${progress.total} tool${progress.total > 1 ? 's' : ''}`)
       }
-      // Don't show "Generating response..." - text parts will indicate response generation
     }
-  }, [hasReceivedFirstEvent, addStatusMessage])
+  }, [hasReceivedFirstEvent, addStatusMessage, handleMessageUpdated])
 
   const updateStatusFromPart = useCallback((part: AssistantMessagePart, messageId: string, messageMetadata?: MessageMetadata) => {
     if (!hasReceivedFirstEvent) {
       setHasReceivedFirstEvent(true)
     }
 
+    // Update new store
+    handlePartUpdated(part, messageId)
+
     if (part.type === 'tool' && part.state) {
       const status = getContextualToolStatus(part, messageMetadata)
       addStatusMessage(status)
-      
-      if (part.state.status === 'completed') {
-        // Don't add "Generating response..." status as text parts will arrive immediately
-        // and the presence of text indicates response generation
-      }
     } else if (part.type === 'text') {
       if (part.text && part.text.trim()) {
-        // Debug: Log text parts to help identify the echo issue
         logger.debug('Received text part:', { messageId, text: part.text.substring(0, 100) + (part.text.length > 100 ? '...' : '') })
-        addTextMessage(part.text, messageId)
       }
-    } else if (part.type === 'step-start') {
-      // TODO: Handle step-start differently - commented out for now
-      // if (hasReceivedFirstEvent) {
-      //   addStatusMessage('Processing next step...')
-      // }
     }
-  }, [hasReceivedFirstEvent, isLoading, addStatusMessage, addTextMessage])
+  }, [hasReceivedFirstEvent, addStatusMessage, handlePartUpdated])
 
   useEffect(() => {
     eventStream.connect()

@@ -4,17 +4,24 @@ import { createTextMessageRequest } from '../utils/apiHelpers'
 import { useSessionStore } from '../stores/sessionStore'
 import { useModelStore } from '../stores/modelStore'
 import { useMessageStore } from '../stores/messageStore'
+import { useMessageStoreV2 } from '../stores/messageStoreV2'
 import { logger } from '../lib/logger'
+import type { Message, AssistantMessagePart } from '../services/types'
 
 export function useMessageHandling() {
   const { sessionId, isInitializing, setIdle } = useSessionStore()
   const { selectedModel, getProviderForModel } = useModelStore()
+
+  // Keep old store for status messages
   const { 
     addStatusMessage, 
-    addUserMessage, 
+    addUserMessage: addUserMessageOld,
     addErrorMessage, 
     setLastStatusMessage 
   } = useMessageStore()
+
+  // New store
+  const { addUserMessage: addUserMessageV2 } = useMessageStoreV2()
 
   const handleMessageSubmit = useCallback(async (
     userInput: string, 
@@ -31,15 +38,27 @@ export function useMessageHandling() {
     setLastStatusMessage('') // Reset last status for new conversation
     setIdle(false) // Reset idle state when starting new message
     
-    // Add user message to messages
-    addUserMessage(userInput)
+    // Get the correct provider for the selected model
+    const providerId = getProviderForModel(selectedModel)
+    const request = createTextMessageRequest(userInput, sessionId, providerId, selectedModel, selectedMode)
+
+    // Add user message to both stores for now to keep UI working until fully migrated
+    addUserMessageOld(userInput)
+
+    const userMessage: Message = {
+      id: request.messageID,
+      role: 'user',
+      parts: request.parts as AssistantMessagePart[], // Casting to align with Message type in types.ts
+      metadata: {
+        time: { created: Date.now() },
+        sessionID: sessionId,
+        tool: {}
+      }
+    }
+    addUserMessageV2(userMessage)
     
     try {
-      // Get the correct provider for the selected model
-      const providerId = getProviderForModel(selectedModel)
-      const message = createTextMessageRequest(userInput, sessionId, providerId, selectedModel, selectedMode)
-      
-      const response = await sendMessage(sessionId, message)
+      const response = await sendMessage(sessionId, request)
       // logger.debug('Message response:', response)
       
       // If we haven't received any events yet, handle the response directly
@@ -48,11 +67,7 @@ export function useMessageHandling() {
         if (hasTools) {
           addStatusMessage('Processing tools...')
         }
-        // Omit "Response received" status since receiving a message makes this apparent
       }
-      
-      // Note: Individual text parts will be added via event stream
-      // No fallback needed - event stream handles all text parts
       
     } catch (error) {
       logger.error('Failed to send message:', error)
@@ -60,7 +75,7 @@ export function useMessageHandling() {
     } finally {
       setIsLoading(false)
     }
-  }, [sessionId, isInitializing, selectedModel, getProviderForModel, addUserMessage, addStatusMessage, setLastStatusMessage, setIdle, addErrorMessage])
+  }, [sessionId, isInitializing, selectedModel, getProviderForModel, addUserMessageOld, addUserMessageV2, addStatusMessage, setLastStatusMessage, setIdle, addErrorMessage])
 
   return {
     handleMessageSubmit
